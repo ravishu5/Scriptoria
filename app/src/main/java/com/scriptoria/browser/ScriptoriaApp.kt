@@ -62,6 +62,10 @@ class ScriptoriaApp : Application() {
         userscriptManager = UserscriptManager(this, scriptRepository, gmStorageRepository, requireManager, httpClient)
         downloadPreferences = com.scriptoria.browser.data.preferences.DownloadPreferences(this)
         downloadManagerRepository = com.scriptoria.browser.data.repository.DownloadManagerRepository(this, downloadPreferences)
+
+        // Nothing can be mid-transfer at process start, so any leftover progress notification
+        // or pending file belongs to a download that died with the previous process.
+        com.scriptoria.browser.engine.network.StreamDownloads.clearOrphans(this)
     }
 
     private fun createNotificationChannel() {

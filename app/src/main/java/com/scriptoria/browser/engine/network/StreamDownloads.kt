@@ -2,8 +2,12 @@ package com.scriptoria.browser.engine.network
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
+import android.provider.MediaStore
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -163,6 +167,72 @@ object StreamDownloads {
     /** True while the page still has an open session — lets JS detect a cancel from the UI. */
     fun isActive(id: Int): Boolean = sessions.containsKey(id)
 
+    /**
+     * Clears wreckage left by a previous process.
+     *
+     * Sessions live only in memory, so nothing survives a restart: any download notification
+     * still on screen, and any MediaStore entry still marked pending, belongs to a transfer
+     * that died with its process. Run once at startup, before any session can exist — if the
+     * app was swiped away mid-download, this is what stops a dead progress notification and an
+     * invisible half-written file from hanging around.
+     */
+    fun clearOrphans(context: Context) {
+        cancelStaleNotifications(context)
+        deleteStalePartials(context)
+    }
+
+    private fun cancelStaleNotifications(context: Context) {
+        try {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            manager.activeNotifications
+                .filter { it.notification.channelId == CHANNEL_ID }
+                .forEach { manager.cancel(it.id) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not sweep stale notifications: ${e.message}")
+        }
+    }
+
+    private fun deleteStalePartials(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            val resolver = context.contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME)
+            val selection = "${MediaStore.Downloads.IS_PENDING} = 1"
+
+            // Scoped storage limits this to entries this app owns, so no other app's
+            // in-flight download can be caught by the sweep.
+            val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                resolver.query(collection, projection, Bundle().apply {
+                    putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                }, null)
+            } else {
+                resolver.query(collection, projection, selection, null, null)
+            }
+
+            var removed = 0
+            cursor?.use { rows ->
+                val idColumn = rows.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                val nameColumn = rows.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)
+                while (rows.moveToNext()) {
+                    val uri = ContentUris.withAppendedId(collection, rows.getLong(idColumn))
+                    val name = rows.getString(nameColumn)
+                    try {
+                        resolver.delete(uri, null, null)
+                        removed++
+                        Log.i(TAG, "Cleared orphaned partial: $name")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not delete orphaned partial $name: ${e.message}")
+                    }
+                }
+            }
+            if (removed > 0) Log.i(TAG, "Cleared $removed orphaned partial download(s)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Orphan sweep failed: ${e.message}")
+        }
+    }
+
     private fun closeQuietly(session: Session) {
         try {
             session.output.close()
@@ -189,7 +259,10 @@ object StreamDownloads {
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle(name)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setOngoing(true)
+            // Deliberately NOT ongoing. These bytes come from the page, so no service owns the
+            // transfer: if the process dies mid-download an ongoing notification would outlive
+            // it with nothing left to clear it, and the user could not even swipe it away.
+            .setOngoing(false)
             .setSilent(true)
 
         val total = session.totalBytes
