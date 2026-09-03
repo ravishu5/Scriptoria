@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scriptoria Compatibility Test Bench</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #0F172A;
+            color: #F8FAFC;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.5;
+        }
+        h1 { color: #818CF8; font-size: 24px; margin-bottom: 8px; }
+        .subtitle { color: #94A3B8; font-size: 14px; margin-bottom: 24px; }
+        .card {
+            background-color: #1E293B;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border: 1px solid #334155;
+        }
+        .card h2 { margin-top: 0; font-size: 16px; color: #38BDF8; }
+        .test-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #334155;
+        }
+        .test-row:last-child { border-bottom: none; }
+        .status {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status.pass { background-color: #065F46; color: #34D399; }
+        .status.fail { background-color: #7F1D1D; color: #F87171; }
+        .status.pending { background-color: #374151; color: #9CA3AF; }
+        #injected-box {
+            display: none;
+            padding: 12px;
+            background-color: #312E81;
+            border-radius: 8px;
+            margin-top: 12px;
+            color: #E0E7FF;
+        }
+    </style>
+</head>
+<body>
+    <h1>Scriptoria Test Bench</h1>
+    <div class="subtitle">Verifies Tampermonkey / Violentmonkey API compatibility inside Android WebView</div>
+
+    <div class="card">
+        <h2>Live API Compatibility Checks</h2>
+        <div id="test-results">
+            <div class="test-row">
+                <span>GM_getValue / GM_setValue (Storage)</span>
+                <span id="test-storage" class="status pending">Waiting for Script...</span>
+            </div>
+            <div class="test-row">
+                <span>GM_addStyle (CSS Injection)</span>
+                <span id="test-style" class="status pending">Waiting for Script...</span>
+            </div>
+            <div class="test-row">
+                <span>GM_xmlhttpRequest (Cross-Origin XHR)</span>
+                <span id="test-xhr" class="status pending">Waiting for Script...</span>
+            </div>
+            <div class="test-row">
+                <span>Modern GM.* Promisified APIs</span>
+                <span id="test-gm4" class="status pending">Waiting for Script...</span>
+            </div>
+            <div class="test-row">
+                <span>unsafeWindow reference</span>
+                <span id="test-unsafewindow" class="status pending">Waiting for Script...</span>
+            </div>
+        </div>
+        <div id="injected-box">Test Script Injected!</div>
+    </div>
+
+    <div class="card">
+        <h2>Sample Benchmark Userscript</h2>
+        <p style="font-size: 13px; color: #94A3B8;">
+            Below is the benchmark script that tests these APIs on this page:
+        </p>
+        <pre style="background: #020617; padding: 12px; border-radius: 8px; font-size: 11px; overflow-x: auto; color: #A5B4FC;">
+// ==UserScript==
+// @name         Scriptoria Test Script
+// @namespace    com.scriptoria.test
+// @version      1.0.0
+// @description  Automated verification of GM APIs
+// @match        *://*/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @run-at       document-end
+// ==/UserScript==
+        </pre>
+    </div>
+
+    <script>
+        // Callback hook for userscripts to report success
+        window.reportTestResult = function(testId, passed, details) {
+            var el = document.getElementById(testId);
+            if (el) {
+                el.className = 'status ' + (passed ? 'pass' : 'fail');
+                el.textContent = passed ? 'PASSED' : ('FAILED: ' + (details || ''));
+            }
+        };
+    </script>
+</body>
+</html>

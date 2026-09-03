@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stylized Userscript Scroll & Terminal brackets -->
+    <path
+        android:fillColor="#818CF8"
+        android:pathData="M32,32 L48,54 L32,76 L38,76 L54,54 L38,32 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M56,68 L76,68 L76,74 L56,74 Z" />
+</vector>

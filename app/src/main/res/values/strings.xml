@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Scriptoria</string>
+    <string name="search_or_type_url">Search or type URL</string>
+    <string name="userscripts">Userscripts</string>
+    <string name="no_scripts_running">No scripts running on this page</string>
+    <string name="install_userscript">Install Userscript</string>
+    <string name="install">Install</string>
+    <string name="cancel">Cancel</string>
+    <string name="manage_scripts">Manage Scripts</string>
+</resources>
