@@ -1,8 +1,13 @@
 package com.scriptoria.browser.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,9 +45,14 @@ class MainActivity : ComponentActivity() {
 
     private val browserViewModel: BrowserViewModel by viewModels()
 
+    private val requestPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        requestDownloadPermissions()
 
         // Handle VIEW intent if user opened a link from another app
         intent?.data?.toString()?.let { incomingUrl ->
@@ -136,6 +146,28 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Downloads report progress through notifications, and on pre-scoped-storage devices they
+     * write to public storage. Both are runtime permissions that were declared but never asked
+     * for, so downloads ran silently (or failed) on modern and old devices respectively.
+     */
+    private fun requestDownloadPermissions() {
+        val needed = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (needed.isNotEmpty()) {
+            requestPermissions.launch(needed.toTypedArray())
         }
     }
 }

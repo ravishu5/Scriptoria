@@ -54,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,6 +73,9 @@ import com.scriptoria.browser.data.model.DownloadType
 import com.scriptoria.browser.data.model.DownloadedItem
 import com.scriptoria.browser.data.preferences.DownloadPreferences
 import com.scriptoria.browser.data.repository.DownloadManagerRepository
+import com.scriptoria.browser.engine.network.ActiveDownloads
+import com.scriptoria.browser.engine.network.DownloadService
+import com.scriptoria.browser.engine.network.DownloadStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,12 +88,17 @@ fun DownloadsScreen(
     var items by remember { mutableStateOf<List<DownloadedItem>>(emptyList()) }
     var folderDisplayName by remember { mutableStateOf(downloadPreferences.folderDisplayName) }
 
+    val activeDownloads by ActiveDownloads.downloads.collectAsState()
+    val completions by ActiveDownloads.completions.collectAsState()
+
     fun refreshList() {
         items = downloadRepository.getDownloadedFiles()
         folderDisplayName = downloadPreferences.folderDisplayName
     }
 
-    LaunchedEffect(Unit) {
+    // Also fires on first composition, and again each time a download lands, so a finished
+    // file appears in the list without the user reaching for the refresh button.
+    LaunchedEffect(completions) {
         refreshList()
     }
 
@@ -120,8 +129,13 @@ fun DownloadsScreen(
                 title = {
                     Column {
                         Text("Downloads", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                        val running = activeDownloads.count { it.status != DownloadStatus.FAILED }
                         Text(
-                            text = "${items.size} file${if (items.size == 1) "" else "s"}",
+                            text = if (running > 0) {
+                                "$running downloading  •  ${items.size} file${if (items.size == 1) "" else "s"}"
+                            } else {
+                                "${items.size} file${if (items.size == 1) "" else "s"}"
+                            },
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -220,7 +234,7 @@ fun DownloadsScreen(
                 }
             }
 
-            if (items.isEmpty()) {
+            if (items.isEmpty() && activeDownloads.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -265,6 +279,38 @@ fun DownloadsScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 24.dp)
                 ) {
+                    if (activeDownloads.isNotEmpty()) {
+                        item(key = "header-active") { SectionHeader("In progress") }
+
+                        items(activeDownloads, key = { "active-${it.id}" }) { download ->
+                            ActiveDownloadRow(
+                                download = download,
+                                onCancel = { DownloadService.cancel(context, download.id) },
+                                onRetry = {
+                                    ActiveDownloads.remove(download.id)
+                                    DownloadService.enqueue(
+                                        context = context.applicationContext,
+                                        url = download.url,
+                                        fileName = download.name,
+                                        mimeType = download.mimeType,
+                                        userAgent = download.userAgent,
+                                        referer = download.referer
+                                    )
+                                },
+                                onDismiss = { ActiveDownloads.remove(download.id) }
+                            )
+                            HorizontalDivider(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                            )
+                        }
+
+                        // Only labelled when there is something above it to distinguish from.
+                        if (items.isNotEmpty()) {
+                            item(key = "header-saved") { SectionHeader("Saved") }
+                        }
+                    }
+
                     items(items, key = { it.name + it.lastModified }) { item ->
                         DownloadedItemRow(
                             item = item,
@@ -288,6 +334,18 @@ fun DownloadsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = title.uppercase(),
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 6.dp)
+    )
 }
 
 @Composable

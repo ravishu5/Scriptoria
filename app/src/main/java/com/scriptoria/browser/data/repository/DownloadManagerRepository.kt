@@ -30,7 +30,7 @@ class DownloadManagerRepository(
                 val docDir = DocumentFile.fromTreeUri(context, treeUri)
                 if (docDir != null && docDir.isDirectory) {
                     return docDir.listFiles()
-                        .filter { it.isFile }
+                        .filter { it.isFile && isVisibleDownload(it.name) }
                         .mapNotNull { file ->
                             val name = file.name ?: return@mapNotNull null
                             val size = file.length()
@@ -58,7 +58,7 @@ class DownloadManagerRepository(
         val items = mutableListOf<DownloadedItem>()
         val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Scriptoria")
         if (dir.exists() && dir.isDirectory) {
-            dir.listFiles()?.filter { it.isFile }?.forEach { file ->
+            dir.listFiles()?.filter { it.isFile && isVisibleDownload(it.name) }?.forEach { file ->
                 val name = file.name
                 val size = file.length()
                 val lastMod = file.lastModified()
@@ -134,6 +134,15 @@ class DownloadManagerRepository(
     }
 
     companion object {
+        /**
+         * A download still being written through MediaStore exists on disk as
+         * `.pending-<id>-<name>` until IS_PENDING is cleared. Those placeholders are not files
+         * the user saved, so they must not appear in the list — the in-progress section already
+         * shows that transfer. Dotfiles are excluded generally, which covers the same ground.
+         */
+        fun isVisibleDownload(name: String?): Boolean =
+            !name.isNullOrBlank() && !name.startsWith(".")
+
         fun resolveDownloadType(name: String, mime: String): DownloadType {
             val lower = name.lowercase()
             return when {
