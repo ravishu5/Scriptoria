@@ -1,13 +1,16 @@
 package com.scriptoria.browser.data.repository
 
+import android.content.Context
 import com.scriptoria.browser.data.database.ScriptDao
 import com.scriptoria.browser.data.database.entities.ScriptEntity
 import com.scriptoria.browser.data.storage.ScriptFileStore
 import com.scriptoria.browser.engine.parser.RunAt
 import com.scriptoria.browser.engine.parser.UserscriptMetadata
 import com.scriptoria.browser.engine.parser.UserscriptParser
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 class ScriptRepository(
@@ -210,6 +213,43 @@ class ScriptRepository(
             list
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    /**
+     * Discovers and pre-installs bundled userscripts from assets/preinstalled_scripts/.
+     * Scripts are installed and enabled by default on initial launch.
+     */
+    suspend fun seedPreinstalledScripts(context: Context) = withContext(Dispatchers.IO) {
+        try {
+            val assetManager = context.assets
+            val scriptFiles = assetManager.list("preinstalled_scripts") ?: return@withContext
+            for (fileName in scriptFiles) {
+                if (!fileName.endsWith(".user.js", ignoreCase = true)) continue
+                val code = assetManager.open("preinstalled_scripts/$fileName").bufferedReader().use { it.readText() }
+                if (code.isBlank()) continue
+                val metadata = UserscriptParser.parse(code)
+                val existing = scriptDao.getByName(metadata.name)
+                    ?: scriptDao.getAll().find { it.name.contains("Telegram", ignoreCase = true) }
+
+                if (existing != null) {
+                    fileStore.writeScriptCode(existing.id, code)
+                    val updated = existing.copy(
+                        name = metadata.name,
+                        version = metadata.version,
+                        description = metadata.description,
+                        matchesJson = listToJson(metadata.matches),
+                        includesJson = listToJson(metadata.includes),
+                        lastUpdated = System.currentTimeMillis()
+                    )
+                    scriptDao.update(updated)
+                } else {
+                    addOrUpdate(code)
+                    android.util.Log.i("ScriptRepository", "Pre-installed userscript added: ${metadata.name}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ScriptRepository", "Error seeding preinstalled scripts", e)
         }
     }
 }

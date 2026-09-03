@@ -45,6 +45,7 @@ class UserscriptManager(
     init {
         loadShimTemplate()
         coroutineScope.launch {
+            scriptRepository.seedPreinstalledScripts(context)
             reload()
         }
     }
