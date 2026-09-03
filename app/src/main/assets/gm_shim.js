@@ -362,44 +362,6 @@
         };
     }
 
-    // Ensure mobile touch visibility for Telegram inline download buttons and add mobile viewer button
-    if (!window.__scriptoriaMobileStylesInjected) {
-        window.__scriptoriaMobileStylesInjected = true;
-        try {
-            var style = document.createElement('style');
-            style.id = 'scriptoria-mobile-helper';
-            style.textContent = '.tgdl-inline-dl { opacity: 0.9 !important; display: flex !important; visibility: visible !important; background: rgba(0,0,0,0.65) !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; } .tgdl-batch-fab { bottom: 70px !important; }';
-            (document.head || document.documentElement).appendChild(style);
-        } catch (e) {}
-
-        // Mobile Media Viewer floating download button
-        setInterval(function() {
-            var viewer = document.getElementById('MediaViewer') || document.querySelector('.media-viewer-whole, .MediaViewer');
-            if (viewer && !viewer.querySelector('.tgdl-mobile-viewer-dl')) {
-                var video = viewer.querySelector('video');
-                var img = viewer.querySelector('img');
-                var src = (video && (video.src || video.currentSrc)) || (img && img.src);
-                if (src) {
-                    var btn = document.createElement('button');
-                    btn.className = 'tgdl-mobile-viewer-dl';
-                    btn.innerHTML = '⬇️ Download Media';
-                    btn.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:99999;background:#3390EC;color:#fff;padding:10px 18px;border-radius:24px;border:none;font-weight:bold;font-size:14px;box-shadow:0 4px 16px rgba(0,0,0,0.5);display:flex;align-items:center;gap:6px;cursor:pointer;';
-                    btn.onclick = function(e) {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        var cur = (video && (video.src || video.currentSrc)) || src;
-                        if (window.Downloader && window.Downloader.enqueue) {
-                            window.Downloader.enqueue(cur, video ? 'video' : 'image');
-                        } else {
-                            var ext = video ? 'mp4' : 'jpg';
-                            GM_download(cur, 'telegram_media_' + Date.now() + '.' + ext);
-                        }
-                    };
-                    viewer.appendChild(btn);
-                }
-            }
-        }, 800);
-    }
 
     // ==========================================
     // Export Globals onto window
