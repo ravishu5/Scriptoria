@@ -29,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,7 +76,7 @@ fun BrowserScreen(
         topBar = {
             Column(modifier = Modifier.statusBarsPadding()) {
                 Omnibox(
-                    url = activeTab?.url ?: "",
+                    url = activeTab?.url?.takeIf { it != HOME_URL } ?: "",
                     isLoading = activeTab?.isLoading ?: false,
                     activeScriptsCount = activeTab?.activeScriptsCount ?: 0,
                     tabsCount = tabs.size,
@@ -132,7 +133,7 @@ fun BrowserScreen(
                     }
 
                     IconButton(
-                        onClick = { activeTab?.let { viewModel.loadUrl(it.id, "https://duckduckgo.com") } },
+                        onClick = { activeTab?.let { viewModel.loadUrl(it.id, HOME_URL) } },
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.Home, contentDescription = "Home")
@@ -162,10 +163,21 @@ fun BrowserScreen(
         ) {
             // Active Tab's WebView Container
             activeTab?.let { tab ->
+                // Keyed by tab id. Without a key Compose reuses one AndroidView node across
+                // tab switches, so factory runs only for the first tab and every other tab
+                // shows that tab's page.
+                key(tab.id) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
-                        val webView = tab.webView ?: ScriptoriaWebView(
+                        val existing = tab.webView
+                        if (existing != null) {
+                            // Reused so switching away and back keeps the page and history.
+                            // It must be detached first: a View cannot join a second parent
+                            // while the previous one still holds it.
+                            (existing.parent as? ViewGroup)?.removeView(existing)
+                            existing
+                        } else ScriptoriaWebView(
                             context = ctx,
                             tabId = tab.id,
                             onOpenNewTab = { url, makeActive ->
@@ -201,15 +213,14 @@ fun BrowserScreen(
                             )
 
                             loadUrl(tab.url)
-                        }
-
-                        tab.webView = webView
-                        webView
+                        }.also { tab.webView = it }
                     },
-                    update = { view ->
-                        // View is kept up to date
+                    onRelease = { view ->
+                        // Detach on dispose so the next tab can adopt this view cleanly.
+                        (view.parent as? ViewGroup)?.removeView(view)
                     }
                 )
+                }
             }
         }
     }

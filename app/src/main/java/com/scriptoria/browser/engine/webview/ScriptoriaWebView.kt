@@ -57,6 +57,16 @@ class ScriptoriaWebView(
         }
     }
 
+    /**
+     * onPageStarted is delivered after the renderer has already begun running page scripts, so
+     * the bridge cannot rely on it to know where it is. Recording the target here closes that
+     * race for every load the app initiates, including the start page.
+     */
+    override fun loadUrl(url: String) {
+        nativeBridge.updateCurrentUrl(url)
+        super.loadUrl(url)
+    }
+
     override fun destroy() {
         removeJavascriptInterface("ScriptoriaNativeBridge")
         tokenManager.clearForNavigation()

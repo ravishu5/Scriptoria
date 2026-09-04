@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Super Telegram media downloader
-// @version      2.5
+// @version      2.6
 // @description  Supercharged media downloader for Telegram Web (WebK & WebZ/WebA). Features reliable chunked streaming, universal Telegram blue in-chat & viewer download buttons, instant blob saving, and a sleek glassmorphic download manager.
 // @match        *://web.telegram.org/*
 // @match        *://webk.telegram.org/*
@@ -35,6 +35,8 @@
         DOC_PROBE_MS: 2500,        // how long to wait for a click to show any sign of life
         DOC_IDLE_TIMEOUT: 25000,   // give up if Telegram shows no transfer activity for this long
         DOC_MAX_WAIT: 600000,      // absolute ceiling for one file Telegram is fetching itself
+        NATIVE_CHUNK_BYTES: 4 * 1024 * 1024,   // slice size handed to Scriptoria's streaming bridge
+        NATIVE_QUEUE_BYTES: 12 * 1024 * 1024,  // how far fetching may run ahead of disk writes
     };
 
     // Anything that means "a transfer is in flight", across both web clients.
@@ -903,6 +905,69 @@
         }
     }
 
+    // ─── Native Streaming Bridge ─────────────────────────────────────────
+    // Scriptoria can write a download to disk incrementally. Telegram's media has no origin a
+    // native request could reach — blob: and service-worker URLs only resolve inside this page —
+    // so the page still does the fetching, but bytes go straight to the browser's Downloads
+    // screen as they arrive instead of piling up in memory until the whole file can be handed
+    // over at once. That handover used to mean a multi-hundred-megabyte blob plus a third again
+    // of base64, which froze the page for the duration.
+    const NativeStream = {
+        get available() {
+            return typeof window.ScriptoriaNativeBridge?.beginStreamDownload === "function";
+        },
+
+        // Registers the file so it appears in Downloads on click. Size may still be unknown.
+        begin(fileName, mime, totalBytes) {
+            try {
+                const id = window.ScriptoriaNativeBridge.beginStreamDownload(
+                    fileName, mime || "", String(totalBytes > 0 ? totalBytes : -1)
+                );
+                return id >= 0 ? id : null;
+            } catch (err) {
+                log.warn("Native streaming unavailable: " + err.message);
+                return null;
+            }
+        },
+
+        setTotal(id, totalBytes) {
+            if (!(totalBytes > 0)) return;
+            try { window.ScriptoriaNativeBridge.setStreamDownloadTotal(id, String(totalBytes)); } catch (err) {}
+        },
+
+        // Sliced so a large range response never becomes one oversized base64 string.
+        // Returns false once the browser drops the session, e.g. the user cancelled it there.
+        async write(id, blob) {
+            for (let pos = 0; pos < blob.size; pos += CONFIG.NATIVE_CHUNK_BYTES) {
+                const end = Math.min(pos + CONFIG.NATIVE_CHUNK_BYTES, blob.size);
+                const b64 = await this._toBase64(blob.slice(pos, end));
+                if (!window.ScriptoriaNativeBridge.writeStreamChunk(id, b64)) return false;
+            }
+            return true;
+        },
+
+        finish(id) {
+            try { window.ScriptoriaNativeBridge.finishStreamDownload(id); } catch (err) {}
+        },
+
+        abort(id) {
+            try { window.ScriptoriaNativeBridge.abortStreamDownload(id); } catch (err) {}
+        },
+
+        _toBase64(blob) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const result = reader.result || "";
+                    const comma = result.indexOf(",");
+                    resolve(comma >= 0 ? result.slice(comma + 1) : "");
+                };
+                reader.onerror = () => reject(reader.error || new Error("chunk read failed"));
+                reader.readAsDataURL(blob);
+            });
+        },
+    };
+
     // ─── Download Engine ─────────────────────────────────────────────────
     const Downloader = {
         _queue: [],
@@ -974,6 +1039,8 @@
             this._queue = this._queue.filter(i => i.id !== id);
             const active = this._active.get(id);
             if (active?.abortCtrl) active.abortCtrl.abort();
+            // Drop the partial file too, so a cancelled download leaves nothing behind.
+            if (active?.nativeId != null) NativeStream.abort(active.nativeId);
             this._active.delete(id);
             this._tick();
         },
@@ -993,6 +1060,25 @@
                 const cached = NetSniffer.getBlob(item.url);
                 try {
                     const blob = cached || await (await fetch(item.url)).blob();
+
+                    if (NativeStream.available) {
+                        const nid = NativeStream.begin(item.fileName, blob.type, blob.size);
+                        if (nid !== null) {
+                            // Hand the progress display off to the browser's Downloads screen.
+                            // The slot stays held until the write finishes, so MAX_CONCURRENT
+                            // still means something.
+                            UI.removeToast(item.id);
+                            log.info(`Handed to browser Downloads: ${item.fileName}`);
+
+                            const ok = await NativeStream.write(nid, blob);
+                            if (ok) NativeStream.finish(nid); else NativeStream.abort(nid);
+                            this._active.delete(item.id);
+                            item.resolve(item.fileName);
+                            this._tick();
+                            return;
+                        }
+                    }
+
                     await this._saveBlob(blob, item.fileName);
                     UI.updateToast(item.id, { state: "done", fileName: item.fileName });
                     this._active.delete(item.id);
@@ -1012,9 +1098,63 @@
 
             let blobs = [], offset = 0, totalSize = null, realFileName = item.fileName;
 
+            // Register with the browser up front, so the file appears in Downloads the moment
+            // it is clicked instead of only once the whole transfer has finished. The size is
+            // not known until the first Content-Range, so it starts out indeterminate.
+            let nativeId = NativeStream.available ? NativeStream.begin(item.fileName, null, -1) : null;
+            if (nativeId !== null) {
+                const entry = this._active.get(item.id);
+                if (entry) entry.nativeId = nativeId;   // so cancel() can drop the partial file
+                UI.removeToast(item.id);
+                log.info(`Handed to browser Downloads: ${item.fileName}`);
+            }
+
+            // Writes are queued, not awaited, so the next range request starts while the
+            // previous chunk is still going to disk. Awaiting each write made the transfer run
+            // at (network + encode + write) per chunk instead of overlapping them.
+            let writeChain = Promise.resolve(true);
+            let queuedBytes = 0;
+            let writeFailed = false;
+            // Split the wall clock so a slow transfer can be blamed on the right thing:
+            // waiting on Telegram, or waiting on our own disk handoff.
+            let fetchMs = 0, writeWaitMs = 0, chunkCount = 0;
+
+            const enqueueWrite = (blob) => {
+                if (nativeId === null) { blobs.push(blob); return; }
+                queuedBytes += blob.size;
+                writeChain = writeChain.then(async (ok) => {
+                    try {
+                        if (!ok) return false;
+                        const written = await NativeStream.write(nativeId, blob);
+                        if (!written) writeFailed = true;
+                        return written;
+                    } finally {
+                        queuedBytes -= blob.size;
+                    }
+                });
+            };
+
+            // Bounded, so a fast network cannot pull the whole file into memory ahead of disk.
+            const applyBackpressure = async () => {
+                if (queuedBytes > CONFIG.NATIVE_QUEUE_BYTES) await writeChain;
+            };
+
+            // The browser dropped the session, which means it was cancelled from Downloads.
+            const cancelledByBrowser = () => {
+                abortCtrl.abort();
+                // Drop the half-written file rather than leaving an open session behind.
+                if (nativeId !== null) NativeStream.abort(nativeId);
+                nativeId = null;
+                UI.removeToast(item.id);
+                this._active.delete(item.id);
+                item.resolve(realFileName);
+                this._tick();
+            };
+
             const fetchChunk = async (retries = 3) => {
                 if (abortCtrl.signal.aborted) return;
                 try {
+                    const tNet = performance.now();
                     const res = await fetch(item.url, {
                         method: "GET", headers: { Range: `bytes=${offset}-` }, signal: abortCtrl.signal,
                     });
@@ -1028,19 +1168,30 @@
                     if (range) {
                         if (range.start !== offset) throw new Error("Gap in byte range");
                         totalSize = range.total; offset = range.end + 1;
+                        if (nativeId !== null) NativeStream.setTotal(nativeId, totalSize);
                     } else if (res.status === 200) {
                         const blob = await res.blob();
-                        totalSize = blob.size; offset = totalSize; blobs.push(blob);
+                        fetchMs += performance.now() - tNet; chunkCount++;
+                        totalSize = blob.size; offset = totalSize;
+                        if (nativeId !== null) NativeStream.setTotal(nativeId, totalSize);
+                        enqueueWrite(blob);
+                        if (writeFailed) return cancelledByBrowser();
                         UI.updateToast(item.id, { fileName: realFileName, pct: 100, downloaded: offset, total: totalSize });
-                        finalize(); return;
+                        await finalize(); return;
                     }
 
-                    blobs.push(await res.blob());
+                    const body = await res.blob();
+                    fetchMs += performance.now() - tNet; chunkCount++;
+                    enqueueWrite(body);
+                    const tWait = performance.now();
+                    await applyBackpressure();
+                    writeWaitMs += performance.now() - tWait;
+                    if (writeFailed) return cancelledByBrowser();
                     const pct = totalSize ? Math.floor((offset * 100) / totalSize) : 0;
                     UI.updateToast(item.id, { fileName: realFileName, pct, downloaded: offset, total: totalSize });
 
                     if (offset < totalSize) await fetchChunk();
-                    else finalize();
+                    else await finalize();
                 } catch (err) {
                     if (abortCtrl.signal.aborted) return;
                     if (retries > 0) {
@@ -1050,14 +1201,43 @@
                     } else {
                         UI.updateToast(item.id, { state: "error" });
                         log.error(`Failed: ${err.message}`, realFileName);
-                        setTimeout(() => { offset = 0; blobs = []; totalSize = null; UI.updateToast(item.id, { pct: 0, state: null }); fetchChunk(); }, CONFIG.RETRY_DELAY);
+                        setTimeout(() => {
+                            // This restarts from byte 0, so whatever was already written is
+                            // stale: drop that file and open a fresh one.
+                            if (nativeId !== null) {
+                                NativeStream.abort(nativeId);
+                                nativeId = NativeStream.begin(realFileName, null, -1);
+                                const entry = this._active.get(item.id);
+                                if (entry) entry.nativeId = nativeId;
+                            }
+                            // Queued writes target the file we just dropped; start clean.
+                            writeChain = Promise.resolve(true);
+                            queuedBytes = 0;
+                            writeFailed = false;
+                            offset = 0; blobs = []; totalSize = null;
+                            UI.updateToast(item.id, { pct: 0, state: null });
+                            fetchChunk();
+                        }, CONFIG.RETRY_DELAY);
                     }
                 }
             };
 
-            const finalize = () => {
+            const finalize = async () => {
                 const mimeMap = { audio: "audio/ogg", video: "video/mp4", document: "application/octet-stream" };
-                this._saveBlob(new Blob(blobs, { type: mimeMap[item.type] || "application/octet-stream" }), realFileName);
+                if (nativeId !== null) {
+                    // Drain queued writes before publishing, or the file would be truncated.
+                    const tDrain = performance.now();
+                    const ok = await writeChain;
+                    if (!ok || writeFailed) return cancelledByBrowser();
+                    writeWaitMs += performance.now() - tDrain;
+                    try {
+                        window.ScriptoriaNativeBridge.logDownloadStats(nativeId,
+                            `fetch=${Math.round(fetchMs)}ms writeWait=${Math.round(writeWaitMs)}ms chunks=${chunkCount}`);
+                    } catch (err) {}
+                    NativeStream.finish(nativeId);
+                } else {
+                    this._saveBlob(new Blob(blobs, { type: mimeMap[item.type] || "application/octet-stream" }), realFileName);
+                }
                 UI.updateToast(item.id, { state: "done", fileName: realFileName });
                 UI.removeToast(item.id);
                 this._active.delete(item.id);
@@ -1572,7 +1752,7 @@
                             }
 
                             // The video is not playing/buffering yet. Resolve the stream.
-                            Toast.show("Loading video stream…", "info", 3000);
+                            log.info("Loading video stream…");
                             const before = Date.now() - 50;
 
                             // Trigger Telegram to start streaming this video
@@ -1625,7 +1805,7 @@
                             if (resolved) {
                                 Downloader.enqueue(resolved, "video", name || null);
                             } else {
-                                Toast.show("Tap play on the video to start download", "warn", 4000);
+                                log.warn("Tap play on the video to start download");
                             }
                             return;
                         }

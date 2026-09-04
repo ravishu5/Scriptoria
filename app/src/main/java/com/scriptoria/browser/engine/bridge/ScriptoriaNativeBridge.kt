@@ -16,18 +16,12 @@ import com.scriptoria.browser.data.repository.GmStorageRepository
 import com.scriptoria.browser.data.repository.ScriptRepository
 import com.scriptoria.browser.engine.console.LogLevel
 import com.scriptoria.browser.engine.console.UserscriptConsole
+import com.scriptoria.browser.engine.network.DownloadService
 import com.scriptoria.browser.engine.network.GmXhrHandler
-import android.app.DownloadManager
-import android.content.ContentValues
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
+import com.scriptoria.browser.engine.network.StreamDownloads
 import android.util.Base64
 import android.webkit.URLUtil
 import android.widget.Toast
-import java.io.File
-import androidx.documentfile.provider.DocumentFile
 import com.scriptoria.browser.data.preferences.DownloadPreferences
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,10 +41,61 @@ class ScriptoriaNativeBridge(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val activeMenuCommands = ConcurrentHashMap<String, String>() // fnId -> caption
 
+    private companion object {
+        const val HOME_PAGE_URL = "file:///android_asset/home.html"
+        const val HOME_PREFS = "scriptoria_home"
+        const val KEY_SHORTCUTS = "shortcuts"
+    }
+
     private fun getAuthorizedScriptId(token: String?): Long? {
         val webView = webViewRef.get() ?: return null
         val currentUrl = webView.url.orEmpty()
         return tokenManager.getScriptIdIfValid(token, currentUrl)
+    }
+
+    /**
+     * Home page shortcuts.
+     *
+     * localStorage cannot hold these: the start page is served from file:///android_asset,
+     * which Chromium treats as an opaque origin, so web storage there is memory-only and is
+     * lost the moment the page goes away.
+     *
+     * Gated to the start page. The bridge is exposed to every page, and without this any site
+     * could read the user's shortcuts or silently plant one pointing wherever it liked.
+     */
+    /**
+     * Tracked rather than read from the WebView on demand: getUrl() is main-thread only and
+     * returns null when called from the JavaScript bridge thread, which silently made every
+     * check below fail. Set from onPageStarted, which already runs on the main thread.
+     */
+    @Volatile
+    private var currentPageUrl: String = ""
+
+    fun updateCurrentUrl(url: String) {
+        currentPageUrl = url
+    }
+
+    private fun isHomePage(): Boolean = currentPageUrl.startsWith(HOME_PAGE_URL)
+
+    private fun homePrefs() =
+        webViewRef.get()?.context?.getSharedPreferences(HOME_PREFS, Context.MODE_PRIVATE)
+
+    @JavascriptInterface
+    fun getHomeShortcuts(): String {
+        if (!isHomePage()) return "[]"
+        return homePrefs()?.getString(KEY_SHORTCUTS, null) ?: "[]"
+    }
+
+    @JavascriptInterface
+    fun setHomeShortcuts(json: String) {
+        if (!isHomePage()) return
+        try {
+            // Parsed before storing so a malformed write cannot wedge the page on next load.
+            JSONArray(json)
+            homePrefs()?.edit()?.putString(KEY_SHORTCUTS, json)?.apply()
+        } catch (e: Exception) {
+            Log.w("ScriptoriaBridge", "Rejected malformed shortcuts payload", e)
+        }
     }
 
     @JavascriptInterface
@@ -167,6 +212,69 @@ class ScriptoriaNativeBridge(
         activeMenuCommands.remove(fnId)
     }
 
+    /**
+     * Streaming download, for media only the page can fetch (Telegram's blob: and
+     * service-worker URLs have no origin a native request could reach).
+     *
+     * The script calls this on click, then feeds chunks — so the file shows up in the Downloads
+     * screen straight away and progresses as it transfers, instead of the page buffering the
+     * whole thing and handing over one enormous base64 string at the end.
+     *
+     * Returns a session id, or -1 if the destination could not be opened.
+     */
+    @JavascriptInterface
+    fun beginStreamDownload(fileName: String, mimeType: String?, totalBytes: String?): Int {
+        val context = webViewRef.get()?.context?.applicationContext ?: return -1
+        // Passed as a string: JS numbers past 2^31 do not survive the int bridge.
+        val total = totalBytes?.toLongOrNull() ?: -1L
+        return StreamDownloads.begin(context, fileName, mimeType, total)
+    }
+
+    /**
+     * Appends one base64 chunk. Returns false once the session is gone (cancelled from the
+     * Downloads screen, or a write failed), which is the script's signal to stop fetching.
+     */
+    @JavascriptInterface
+    fun writeStreamChunk(id: Int, base64Chunk: String): Boolean {
+        val context = webViewRef.get()?.context?.applicationContext ?: return false
+        return try {
+            StreamDownloads.write(context, id, Base64.decode(base64Chunk, Base64.DEFAULT))
+        } catch (e: IllegalArgumentException) {
+            Log.e("ScriptoriaBridge", "Malformed chunk for stream #$id", e)
+            StreamDownloads.abort(context, id)
+            false
+        }
+    }
+
+    /** Supplies the total once the page reads it from a Content-Range header. */
+    @JavascriptInterface
+    fun setStreamDownloadTotal(id: Int, totalBytes: String?) {
+        val context = webViewRef.get()?.context?.applicationContext ?: return
+        StreamDownloads.setTotal(context, id, totalBytes?.toLongOrNull() ?: return)
+    }
+
+    /** Lets the page report where a transfer spent its time, so it reaches logcat. */
+    @JavascriptInterface
+    fun logDownloadStats(id: Int, stats: String) {
+        Log.i("StreamDownloads", "stats #$id $stats")
+    }
+
+    @JavascriptInterface
+    fun finishStreamDownload(id: Int) {
+        val context = webViewRef.get()?.context?.applicationContext ?: return
+        StreamDownloads.finish(context, id)
+    }
+
+    @JavascriptInterface
+    fun abortStreamDownload(id: Int) {
+        val context = webViewRef.get()?.context?.applicationContext ?: return
+        StreamDownloads.abort(context, id)
+    }
+
+    /** Lets a long-running script notice the user cancelled without writing another chunk. */
+    @JavascriptInterface
+    fun isStreamDownloadActive(id: Int): Boolean = StreamDownloads.isActive(id)
+
     @JavascriptInterface
     fun saveBlobDownload(fileName: String, base64Data: String, mimeType: String?) {
         val context = webViewRef.get()?.context ?: return
@@ -179,52 +287,20 @@ class ScriptoriaNativeBridge(
         }
 
         Thread {
+            var sink: com.scriptoria.browser.data.repository.DownloadSink? = null
             try {
                 val bytes = Base64.decode(base64Data, Base64.DEFAULT)
-                var saved = false
 
-                // 1. Check if user configured a custom SAF directory
-                val customUriStr = downloadPreferences.customFolderUriString
-                if (!customUriStr.isNullOrBlank()) {
-                    try {
-                        val treeUri = Uri.parse(customUriStr)
-                        val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                        val targetFile = docDir?.createFile(effectiveMime, safeName)
-                        if (targetFile != null) {
-                            context.contentResolver.openOutputStream(targetFile.uri)?.use { os ->
-                                os.write(bytes)
-                            }
-                            saved = true
-                        }
-                    } catch (e: Exception) {
-                        Log.e("ScriptoriaBridge", "Failed writing to custom SAF folder, falling back", e)
-                    }
-                }
-
-                // 2. Default fallback to public Downloads/Scriptoria
-                if (!saved) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val contentValues = ContentValues().apply {
-                            put(MediaStore.Downloads.DISPLAY_NAME, safeName)
-                            put(MediaStore.Downloads.MIME_TYPE, effectiveMime)
-                            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Scriptoria")
-                        }
-                        val resolver = context.contentResolver
-                        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
-                        if (uri != null) {
-                            resolver.openOutputStream(uri)?.use { os ->
-                                os.write(bytes)
-                            }
-                            saved = true
-                        }
-                    } else {
-                        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Scriptoria")
-                        dir.mkdirs()
-                        val dest = File(dir, safeName)
-                        dest.writeBytes(bytes)
-                        saved = true
-                    }
-                }
+                // Same destination resolution as streamed downloads (custom SAF folder,
+                // else Downloads/Scriptoria), so both paths honour the user's setting.
+                sink = com.scriptoria.browser.data.repository.DownloadSink.create(
+                    context = context,
+                    preferences = downloadPreferences,
+                    requestedName = safeName,
+                    mimeType = effectiveMime
+                )
+                sink.openOutputStream().use { os -> os.write(bytes) }
+                sink.markComplete()
 
                 val sizeDisplay = if (bytes.size >= 1048576) {
                     String.format(java.util.Locale.US, "%.1f MB", bytes.size / 1048576f)
@@ -245,11 +321,13 @@ class ScriptoriaNativeBridge(
 
                 showDownloadNotification(context, safeName, bytes.size)
             } catch (oom: OutOfMemoryError) {
+                sink?.discard()
                 Log.e("ScriptoriaBridge", "Out of memory saving $safeName", oom)
                 mainHandler.post {
                     Toast.makeText(context, "Insufficient memory to save $safeName", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
+                sink?.discard()
                 Log.e("ScriptoriaBridge", "Failed to save blob download: $safeName", e)
                 mainHandler.post {
                     Toast.makeText(context, "Failed to save $safeName: ${e.message}", Toast.LENGTH_LONG).show()
@@ -260,27 +338,29 @@ class ScriptoriaNativeBridge(
 
     @JavascriptInterface
     fun downloadUrl(url: String, fileName: String?, userAgent: String?, mimeType: String?) {
-        val context = webViewRef.get()?.context ?: return
+        val webView = webViewRef.get() ?: return
+        val context = webView.context ?: return
         val safeName = fileName?.replace(Regex("[\\\\/:*?\"<>|]"), "_")?.ifEmpty { null }
             ?: URLUtil.guessFileName(url, null, mimeType)
+        // Many media hosts reject requests without the originating page.
+        val referer = webView.url
 
         try {
-            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val request = DownloadManager.Request(Uri.parse(url)).apply {
-                if (!mimeType.isNullOrBlank()) setMimeType(mimeType)
-                if (!userAgent.isNullOrBlank()) addRequestHeader("User-Agent", userAgent)
-                setTitle(safeName)
-                setDescription("Downloading via Scriptoria")
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Scriptoria/$safeName")
-            }
-            dm.enqueue(request)
-
-            mainHandler.post {
-                Toast.makeText(context, "Downloading $safeName...", Toast.LENGTH_SHORT).show()
-            }
+            // Deliberately not the system DownloadManager: streaming it ourselves keeps the
+            // transfer on the app's own client and lets the Downloads screen show and cancel it.
+            DownloadService.enqueue(
+                context = context.applicationContext,
+                url = url,
+                fileName = safeName,
+                mimeType = mimeType,
+                userAgent = userAgent,
+                referer = referer
+            )
         } catch (e: Exception) {
             Log.e("ScriptoriaBridge", "Failed to enqueue download for $url", e)
+            mainHandler.post {
+                Toast.makeText(context, "Could not start download: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 

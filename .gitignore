@@ -11,3 +11,8 @@
 *.aab
 app/build/
 .kotlin/
+
+# Release signing — never commit
+keystore.properties
+*.jks
+*.keystore
