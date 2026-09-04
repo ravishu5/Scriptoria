@@ -24,6 +24,7 @@ class ScriptoriaWebView(
     val tokenManager = CapabilityTokenManager()
     val nativeBridge: ScriptoriaNativeBridge
     val adblockManager = (context.applicationContext as ScriptoriaApp).adblockManager
+    val videoDetectionManager = (context.applicationContext as ScriptoriaApp).videoDetectionManager
 
     /**
      * True when the cosmetic filter injection is registered to run before the page's own scripts.
@@ -61,6 +62,15 @@ class ScriptoriaWebView(
             onOpenTab = onOpenNewTab
         )
 
+        addJavascriptInterface(
+            com.scriptoria.browser.engine.media.VideoDetectorJsBridge(
+                java.lang.ref.WeakReference(this),
+                tabId,
+                videoDetectionManager
+            ),
+            com.scriptoria.browser.engine.media.VideoDetectorJsBridge.INTERFACE_NAME
+        )
+
         addJavascriptInterface(nativeBridge, "ScriptoriaNativeBridge")
         addJavascriptInterface(AdblockJsBridge(adblockManager), AdblockJsBridge.NAME)
 
@@ -85,7 +95,9 @@ class ScriptoriaWebView(
      * has to be evaluated from a string at run time.
      */
     fun documentStartScript(): String =
-        Scriptlets.library(context) + "\n" + AdblockJsBridge.INJECTION
+        Scriptlets.library(context) + "\n" +
+                AdblockJsBridge.INJECTION + "\n" +
+                com.scriptoria.browser.engine.media.VideoDetectorJsBridge.SCRIPT_INJECTION
 
     /**
      * onPageStarted is delivered after the renderer has already begun running page scripts, so
@@ -100,9 +112,16 @@ class ScriptoriaWebView(
         super.loadUrl(target)
     }
 
+    fun scanForVideos() {
+        post {
+            evaluateJavascript("if (window.__scriptoriaScanVideos) { window.__scriptoriaScanVideos(); }", null)
+        }
+    }
+
     override fun destroy() {
         removeJavascriptInterface("ScriptoriaNativeBridge")
         removeJavascriptInterface(AdblockJsBridge.NAME)
+        removeJavascriptInterface(com.scriptoria.browser.engine.media.VideoDetectorJsBridge.INTERFACE_NAME)
         tokenManager.clearForNavigation()
         super.destroy()
     }

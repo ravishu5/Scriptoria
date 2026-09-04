@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -56,10 +57,12 @@ fun Omnibox(
     isLoading: Boolean,
     activeScriptsCount: Int,
     tabsCount: Int,
+    detectedVideosCount: Int = 0,
     onUrlSubmit: (String) -> Unit,
     onReload: () -> Unit,
     onStop: () -> Unit,
     onOpenActiveScripts: () -> Unit,
+    onOpenVideoDownload: () -> Unit = {},
     onOpenTabSwitcher: () -> Unit,
     onOpenMenu: () -> Unit,
     modifier: Modifier = Modifier
@@ -167,6 +170,32 @@ fun Omnibox(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+
+                // Video Download Indicator Badge (⬇️ N)
+                if (detectedVideosCount > 0) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.tertiaryContainer)
+                            .clickable { onOpenVideoDownload() }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Detected Videos",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = "$detectedVideosCount",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                     }
                 }

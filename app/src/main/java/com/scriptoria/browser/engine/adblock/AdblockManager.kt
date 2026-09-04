@@ -134,8 +134,9 @@ class AdblockManager(
                 loader.loadAllElementFilter(ABP_PREFIX_SCRIPTLET).forEach { container += it }
             },
         )
-    } catch (e: Exception) {
-        Log.w(TAG, "Skipping ${entity.title}: ${e.message}")
+    } catch (e: Throwable) {
+        // See FilterListStore.refresh: a bad list is skipped, never fatal.
+        Log.w(TAG, "Skipping ${entity.title}: $e")
         null
     }
 

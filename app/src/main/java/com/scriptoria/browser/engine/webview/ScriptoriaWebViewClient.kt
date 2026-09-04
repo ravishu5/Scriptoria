@@ -42,7 +42,24 @@ class ScriptoriaWebViewClient(
         request: WebResourceRequest?
     ): WebResourceResponse? {
         if (request == null) return null
-        return adblockManager.intercept(request, currentPageUrl)
+        val adblockResponse = adblockManager.intercept(request, currentPageUrl)
+        if (adblockResponse != null) return adblockResponse
+
+        val scriptoriaWebView = view as? ScriptoriaWebView
+        if (scriptoriaWebView != null) {
+            val reqUrl = request.url?.toString()
+            if (reqUrl != null) {
+                scriptoriaWebView.videoDetectionManager.onNetworkResourceIntercepted(
+                    tabId = scriptoriaWebView.tabId,
+                    // Not view.url: that is main-thread-only and this runs on a WebView worker.
+                    pageUrl = currentPageUrl,
+                    requestUrl = reqUrl,
+                    headers = request.requestHeaders ?: emptyMap()
+                )
+            }
+        }
+
+        return null
     }
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -78,6 +95,7 @@ class ScriptoriaWebViewClient(
         onUrlChange(url)
         view.nativeBridge.updateCurrentUrl(url)
         view.tokenManager.clearForNavigation()
+        view.videoDetectionManager.clearTab(view.tabId)
 
         // On WebView versions without document-start scripts this is the earliest hook available;
         // where the feature exists the injection has already run and returns immediately.
@@ -100,6 +118,10 @@ class ScriptoriaWebViewClient(
         injectScripts(view, url, RunAt.DOCUMENT_BODY)
         injectScripts(view, url, RunAt.DOCUMENT_END)
         injectScripts(view, url, RunAt.DOCUMENT_IDLE)
+
+        // The detector itself is installed by the document-start script; this only asks it to
+        // re-scan now that the page has settled.
+        view.scanForVideos()
 
         // Notify UI about total active scripts on this page
         val active = userscriptManager.getActiveScriptsForUrl(url)

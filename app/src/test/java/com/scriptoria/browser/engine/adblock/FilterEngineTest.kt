@@ -157,6 +157,34 @@ class FilterEngineTest {
         assertTrue(".sponsored" in selectors)
     }
 
+    // --- option removal ------------------------------------------------------------------------
+
+    @Test
+    fun denyallowFilterTerminates() {
+        // The denyallow branch re-decodes the line with the option stripped. When the strip failed
+        // it recursed on an identical string and overflowed the stack, taking the browser with it.
+        val engine = engineOf("||ads.example.com^\$domain=news.test,denyallow=safe.test|other.test")
+        assertTrue(engine.blocks("https://ads.example.com/a.js", pageHost = "news.test"))
+    }
+
+    @Test
+    fun uppercaseOptionIsStillRemoved() {
+        val engine = engineOf("||ads.example.com/pixel\$EMPTY")
+        assertTrue(engine.blocks("https://ads.example.com/pixel"))
+    }
+
+    @Test
+    fun redirectWithOtherOptionsKeepsThem() {
+        val engine = engineOf("||ads.example.com/ad\$redirect=noopjs,script")
+        assertTrue(engine.blocks("https://ads.example.com/ad"))
+        // The surviving $script option must still constrain the rule.
+        assertFalse(
+            engine.shouldBlock(
+                requestFor("https://ads.example.com/ad", type = ContentRequest.TYPE_IMAGE),
+            ),
+        )
+    }
+
     // --- scriptlets ---------------------------------------------------------------------------
 
     @Test

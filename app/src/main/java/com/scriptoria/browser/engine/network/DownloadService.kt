@@ -96,7 +96,8 @@ class DownloadService : Service() {
                             requestedName = intent.getStringExtra(EXTRA_FILENAME),
                             mimeHint = intent.getStringExtra(EXTRA_MIME),
                             userAgent = intent.getStringExtra(EXTRA_USER_AGENT),
-                            referer = intent.getStringExtra(EXTRA_REFERER)
+                            referer = intent.getStringExtra(EXTRA_REFERER),
+                            audioUrl = intent.getStringExtra(EXTRA_AUDIO_URL)
                         )
                     } finally {
                         activeCalls.remove(id)
@@ -132,12 +133,66 @@ class DownloadService : Service() {
         requestedName: String?,
         mimeHint: String?,
         userAgent: String?,
-        referer: String?
+        referer: String?,
+        audioUrl: String? = null
     ) {
         var sink: DownloadSink? = null
         val fallbackName = DownloadSink.sanitizeFileName(
             requestedName?.takeIf { it.isNotBlank() } ?: guessNameFromUrl(url)
         )
+
+        // An adaptive rendition arrives as two streams; neither plays on its own, so they are
+        // fetched together and rewrapped into a single MP4.
+        if (!audioUrl.isNullOrBlank()) {
+            ActiveDownloads.start(id, fallbackName, url, "video/mp4", userAgent, referer)
+            MuxedDownloader.download(
+                context = this,
+                id = id,
+                videoUrl = url,
+                audioUrl = audioUrl,
+                requestedName = fallbackName,
+                userAgent = userAgent,
+                referer = referer,
+                httpClient = ScriptoriaApp.instance.httpClient,
+                preferences = ScriptoriaApp.instance.downloadPreferences,
+                isCancelled = { cancelled[id] == true },
+                onProgressUpdate = { written, total, _ ->
+                    notifyProgress(id, fallbackName, written, total)
+                }
+            )
+            return
+        }
+
+        // DASH is detected and offered, but there is no MPD downloader: without one this would
+        // quietly save the manifest XML as a few-kilobyte "video". Fail visibly instead.
+        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
+                mimeHint?.contains("dash+xml", ignoreCase = true) == true
+        if (isDash) {
+            ActiveDownloads.start(id, fallbackName, url, mimeHint, userAgent, referer)
+            ActiveDownloads.fail(id, "DASH streams are not supported yet")
+            return
+        }
+
+        val isHls = url.contains(".m3u8", ignoreCase = true) ||
+                mimeHint?.contains("mpegurl", ignoreCase = true) == true
+        if (isHls) {
+            ActiveDownloads.start(id, fallbackName, url, "video/mp4", userAgent, referer)
+            HlsDownloader.download(
+                context = this,
+                id = id,
+                m3u8Url = url,
+                requestedName = fallbackName,
+                userAgent = userAgent,
+                referer = referer,
+                httpClient = ScriptoriaApp.instance.httpClient,
+                preferences = ScriptoriaApp.instance.downloadPreferences,
+                isCancelled = { cancelled[id] == true },
+                onProgressUpdate = { written, total, _ ->
+                    notifyProgress(id, fallbackName, written, total)
+                }
+            )
+            return
+        }
 
         ActiveDownloads.start(id, fallbackName, url, mimeHint, userAgent, referer)
 
@@ -386,6 +441,7 @@ class DownloadService : Service() {
         const val EXTRA_MIME = "mime"
         const val EXTRA_USER_AGENT = "user_agent"
         const val EXTRA_REFERER = "referer"
+        const val EXTRA_AUDIO_URL = "audioUrl"
         const val EXTRA_DOWNLOAD_ID = "download_id"
 
         fun enqueue(
@@ -394,7 +450,9 @@ class DownloadService : Service() {
             fileName: String?,
             mimeType: String?,
             userAgent: String?,
-            referer: String? = null
+            referer: String? = null,
+            /** Set for an adaptive rendition whose audio is a separate stream. */
+            audioUrl: String? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 action = ACTION_ENQUEUE
@@ -403,6 +461,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_MIME, mimeType)
                 putExtra(EXTRA_USER_AGENT, userAgent)
                 putExtra(EXTRA_REFERER, referer)
+                putExtra(EXTRA_AUDIO_URL, audioUrl)
             }
             context.startForegroundService(intent)
         }

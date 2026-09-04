@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,6 +44,8 @@ import androidx.compose.ui.unit.sp
 fun BrowserMenuBottomSheet(
     onNewTab: () -> Unit,
     onOpenDownloads: () -> Unit,
+    onOpenVideoDownload: () -> Unit,
+    detectedVideosCount: Int = 0,
     onOpenUserscripts: () -> Unit,
     onOpenConsole: () -> Unit,
     onToggleDesktop: () -> Unit,
@@ -125,6 +128,20 @@ fun BrowserMenuBottomSheet(
                 onClick = {
                     onDismiss()
                     onNewTab()
+                }
+            )
+
+            MenuItem(
+                icon = Icons.Default.VideoLibrary,
+                title = if (detectedVideosCount > 0) "Download Video ($detectedVideosCount)" else "Download Video",
+                subtitle = if (detectedVideosCount > 0) {
+                    "$detectedVideosCount video stream${if (detectedVideosCount > 1) "s" else ""} detected on page"
+                } else {
+                    "Sniff & download video streams"
+                },
+                onClick = {
+                    onDismiss()
+                    onOpenVideoDownload()
                 }
             )
 

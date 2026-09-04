@@ -17,6 +17,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 
+import kotlinx.coroutines.flow.update
+import com.scriptoria.browser.engine.media.DetectedVideo
+import com.scriptoria.browser.engine.media.VideoFormat
+import com.scriptoria.browser.engine.media.VideoQualityOption
+import com.scriptoria.browser.engine.network.DownloadService
+
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as ScriptoriaApp
@@ -46,8 +52,22 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _showMenu = MutableStateFlow(false)
     val showMenu: StateFlow<Boolean> = _showMenu.asStateFlow()
 
+    // Video Download sheet (IDM style)
+    private val _showVideoDownloadSheet = MutableStateFlow(false)
+    val showVideoDownloadSheet: StateFlow<Boolean> = _showVideoDownloadSheet.asStateFlow()
+
     init {
         createTab(HOME_URL, makeActive = true)
+        viewModelScope.launch {
+            app.videoDetectionManager.detectedVideosByTab.collect { map ->
+                _tabs.update { tabsList ->
+                    tabsList.map { tab ->
+                        val videos = map[tab.id] ?: emptyList()
+                        if (tab.detectedVideos != videos) tab.copy(detectedVideos = videos) else tab
+                    }
+                }
+            }
+        }
     }
 
     fun getActiveTab(): TabModel? {
@@ -193,5 +213,53 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             userscriptManager.toggleScript(scriptId, enabled)
             getActiveTab()?.webView?.reload()
         }
+    }
+
+    fun openVideoDownloadSheet() {
+        _showVideoDownloadSheet.value = true
+        scanForVideos()
+    }
+
+    fun dismissVideoDownloadSheet() {
+        _showVideoDownloadSheet.value = false
+    }
+
+    fun scanForVideos() {
+        getActiveTab()?.webView?.scanForVideos()
+    }
+
+    fun downloadVideo(video: DetectedVideo, quality: VideoQualityOption) {
+        val rawTitle = video.title.trim().ifBlank { "video" }
+        val sanitizedTitle = rawTitle.replace(Regex("""[\\/:*?"<>|]"""), "_")
+        val ext = when (quality.format) {
+            // Provisional only: HlsDownloader renames to .ts or .mp4 once it has seen whether
+            // the segments are MPEG-TS or fragmented MP4.
+            VideoFormat.HLS -> "mp4"
+            VideoFormat.WEBM -> "webm"
+            VideoFormat.OTHER -> "mp4"
+            VideoFormat.MP4 -> "mp4"
+            VideoFormat.DASH -> "mp4"
+        }
+        val qualitySuffix = if (quality.quality.isNotBlank() && !quality.quality.contains("Source", ignoreCase = true)) {
+            "_" + quality.quality.replace(Regex("""\s+"""), "_").replace("/", "_")
+        } else ""
+        val fileName = "${sanitizedTitle}${qualitySuffix}.${ext}"
+        val mimeType = when (quality.format) {
+            VideoFormat.HLS -> "application/vnd.apple.mpegurl"
+            VideoFormat.WEBM -> "video/webm"
+            else -> "video/mp4"
+        }
+        val userAgent = getActiveTab()?.webView?.settings?.userAgentString
+
+        DownloadService.enqueue(
+            context = app.applicationContext,
+            url = quality.streamUrl,
+            fileName = fileName,
+            mimeType = mimeType,
+            userAgent = userAgent,
+            referer = video.pageUrl,
+            audioUrl = quality.audioStreamUrl
+        )
+        dismissVideoDownloadSheet()
     }
 }

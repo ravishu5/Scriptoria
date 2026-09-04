@@ -458,9 +458,16 @@ class AbpFilterDecoder {
      */
     private fun String.removeOption(toRemove: String): String {
         val pattern = substringBeforeLast('$')
-        val kept = substringAfterLast('$')
-            .split(',')
-            .filter { it.isNotEmpty() && it.substringBefore('=').trim() != toRemove }
+        // Callers pass either a bare option name ("redirect", "empty") or a whole "name=value"
+        // pair ("denyallow=a.com|b.com"). Matching only one of the two forms leaves the option in
+        // place, and the callers that re-decode the result then recurse on an identical string.
+        val target = toRemove.substringBefore('=').trim().lowercase()
+        val kept = substringAfterLast('$').split(',').filter { option ->
+            val trimmed = option.trim()
+            trimmed.isNotEmpty() &&
+                !trimmed.equals(toRemove.trim(), ignoreCase = true) &&
+                trimmed.substringBefore('=').trim().lowercase() != target
+        }
         return if (kept.isEmpty()) pattern else pattern + "$" + kept.joinToString(",")
     }
 

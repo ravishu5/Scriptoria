@@ -17,5 +17,6 @@ data class TabModel(
     val canGoForward: Boolean = false,
     val activeScriptsCount: Int = 0,
     val activeScripts: List<InstalledScript> = emptyList(),
+    val detectedVideos: List<com.scriptoria.browser.engine.media.DetectedVideo> = emptyList(),
     var webView: ScriptoriaWebView? = null
 )

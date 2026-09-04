@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import android.util.Log
 import androidx.room.Room
 import com.scriptoria.browser.data.database.AppDatabase
 import com.scriptoria.browser.data.repository.GmStorageRepository
@@ -46,6 +47,8 @@ class ScriptoriaApp : Application() {
         private set
     lateinit var adblockManager: AdblockManager
         private set
+    lateinit var videoDetectionManager: com.scriptoria.browser.engine.media.VideoDetectionManager
+        private set
 
     /** Outlives any one activity, for work that must not be cancelled by a rotation. */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -84,6 +87,8 @@ class ScriptoriaApp : Application() {
         adblockManager = AdblockManager(this, httpClient, adblockPreferences)
         startAdblock()
 
+        videoDetectionManager = com.scriptoria.browser.engine.media.VideoDetectionManager(httpClient)
+
         // Nothing can be mid-transfer at process start, so any leftover progress notification
         // or pending file belongs to a download that died with the previous process.
         com.scriptoria.browser.engine.network.StreamDownloads.clearOrphans(this)
@@ -95,8 +100,14 @@ class ScriptoriaApp : Application() {
      */
     private fun startAdblock() {
         appScope.launch {
-            if (adblockManager.store.hasCompiledData()) adblockManager.load()
-            adblockManager.refreshLists(force = false)
+            // Last line of defence: ad blocking is a feature of the browser, never a condition
+            // for it starting, so nothing here is allowed to reach the uncaught handler.
+            try {
+                if (adblockManager.store.hasCompiledData()) adblockManager.load()
+                adblockManager.refreshLists(force = false)
+            } catch (e: Throwable) {
+                Log.e("ScriptoriaApp", "Ad blocking unavailable", e)
+            }
         }
     }
 

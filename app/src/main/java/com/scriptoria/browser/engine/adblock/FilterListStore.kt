@@ -49,10 +49,12 @@ class FilterListStore(
             if (!force && !entity.isExpired()) continue
             try {
                 if (download(entity)) updated++
-            } catch (e: Exception) {
-                // A list that fails to refresh keeps its previously compiled files, so blocking
-                // degrades to stale rules rather than to nothing.
-                Log.w(TAG, "Failed to update ${entity.title}: ${e.message}")
+            } catch (e: Throwable) {
+                // Throwable, not Exception: these lists are untrusted remote text, and a
+                // pathological line can exhaust the parser's stack. A list that fails to refresh
+                // keeps its previously compiled files, so blocking degrades to stale rules rather
+                // than to nothing — and never to a dead browser.
+                Log.w(TAG, "Failed to update ${entity.title}: $e")
             }
         }
         updated
