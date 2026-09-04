@@ -103,37 +103,61 @@ class ScriptoriaWebViewClient(
     window.__scriptoriaCoreInjected = true;
 
     if (!window.showSaveFilePicker && window.ScriptoriaNativeBridge) {
+        // Mapped onto the streaming bridge rather than buffering. Scripts written for desktop
+        // (e.g. Telegram downloaders) call write() once per network chunk precisely so the file
+        // never sits in memory; accumulating here and handing over one base64 string at close()
+        // would defeat that and OOM on a large video.
         window.showSaveFilePicker = async function(options) {
             var suggestedName = (options && options.suggestedName) || 'download.mp4';
+            var bridge = window.ScriptoriaNativeBridge;
+
+            var toBlob = function(data) {
+                if (data instanceof Blob) return data;
+                if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return new Blob([data]);
+                if (typeof data === 'string') return new Blob([data]);
+                return null;
+            };
+
+            var toBase64 = function(blob) {
+                return new Promise(function(resolve, reject) {
+                    var reader = new FileReader();
+                    reader.onloadend = function() {
+                        var result = reader.result || '';
+                        resolve(result.slice(result.indexOf(',') + 1));
+                    };
+                    reader.onerror = function() { reject(reader.error); };
+                    reader.readAsDataURL(blob);
+                });
+            };
+
             return {
                 createWritable: async function() {
-                    var chunks = [];
+                    var id = bridge.beginStreamDownload(suggestedName, '', '-1');
+                    var broken = id < 0;
+                    var SLICE = 4 * 1024 * 1024;
+
                     return {
                         write: async function(data) {
-                            if (data instanceof Blob) {
-                                chunks.push(data);
-                            } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-                                chunks.push(new Blob([data]));
-                            } else if (data && data.data) {
-                                chunks.push(data.data);
+                            if (broken) return;
+                            // The spec also allows { type, data, position } command objects.
+                            var payload = data;
+                            if (data && data.type && 'data' in data) {
+                                if (data.type !== 'write') return;   // seek/truncate: not seekable
+                                payload = data.data;
+                            }
+                            var blob = toBlob(payload);
+                            if (!blob || blob.size === 0) return;
+                            for (var pos = 0; pos < blob.size; pos += SLICE) {
+                                var part = blob.slice(pos, Math.min(pos + SLICE, blob.size));
+                                var chunk = await toBase64(part);
+                                if (!bridge.writeStreamChunk(id, chunk)) { broken = true; return; }
                             }
                         },
                         close: async function() {
-                            var combinedBlob = new Blob(chunks);
-                            var reader = new FileReader();
-                            reader.onloadend = function() {
-                                var base64 = (reader.result || '').split(',')[1];
-                                if (base64) {
-                                    window.ScriptoriaNativeBridge.saveBlobDownload(
-                                        suggestedName,
-                                        base64,
-                                        combinedBlob.type || 'application/octet-stream'
-                                    );
-                                }
-                            };
-                            reader.readAsDataURL(combinedBlob);
+                            if (broken) { bridge.abortStreamDownload(id); return; }
+                            bridge.finishStreamDownload(id);
                         },
-                        abort: async function() {}
+                        abort: async function() { bridge.abortStreamDownload(id); }
                     };
                 }
             };

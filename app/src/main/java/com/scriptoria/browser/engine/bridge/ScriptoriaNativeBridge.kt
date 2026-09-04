@@ -202,6 +202,12 @@ class ScriptoriaNativeBridge(
         StreamDownloads.setTotal(context, id, totalBytes?.toLongOrNull() ?: return)
     }
 
+    /** Lets the page report where a transfer spent its time, so it reaches logcat. */
+    @JavascriptInterface
+    fun logDownloadStats(id: Int, stats: String) {
+        Log.i("StreamDownloads", "stats #$id $stats")
+    }
+
     @JavascriptInterface
     fun finishStreamDownload(id: Int) {
         val context = webViewRef.get()?.context?.applicationContext ?: return

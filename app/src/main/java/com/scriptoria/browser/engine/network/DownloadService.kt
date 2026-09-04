@@ -104,6 +104,12 @@ class DownloadService : Service() {
                 }
             }
 
+            // A page-driven stream is running. Nothing to do but stay alive and foreground,
+            // so the browser is not killed mid-transfer; StreamDownloads releases us later.
+            ACTION_HOLD -> Unit
+
+            ACTION_RELEASE -> stopIfIdle()
+
             else -> stopIfIdle()
         }
 
@@ -242,7 +248,8 @@ class DownloadService : Service() {
     }
 
     private fun stopIfIdle() {
-        if (activeCount.get() == 0) {
+        // Page-driven streams count too: they have no other owner keeping the process alive.
+        if (activeCount.get() == 0 && StreamDownloads.sessionCount() == 0) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -263,7 +270,7 @@ class DownloadService : Service() {
     }
 
     private fun buildSummaryNotification(): android.app.Notification {
-        val count = activeCount.get()
+        val count = activeCount.get() + StreamDownloads.sessionCount()
         val text = when (count) {
             0 -> "Preparing download…"
             1 -> "1 download in progress"
@@ -368,6 +375,8 @@ class DownloadService : Service() {
 
         const val ACTION_ENQUEUE = "com.scriptoria.browser.action.DOWNLOAD_ENQUEUE"
         const val ACTION_CANCEL = "com.scriptoria.browser.action.DOWNLOAD_CANCEL"
+        const val ACTION_HOLD = "com.scriptoria.browser.action.DOWNLOAD_HOLD"
+        const val ACTION_RELEASE = "com.scriptoria.browser.action.DOWNLOAD_RELEASE"
         const val EXTRA_URL = "url"
         const val EXTRA_FILENAME = "filename"
         const val EXTRA_MIME = "mime"
@@ -392,6 +401,33 @@ class DownloadService : Service() {
                 putExtra(EXTRA_REFERER, referer)
             }
             context.startForegroundService(intent)
+        }
+
+        /**
+         * Keeps the service foregrounded while a page-driven stream runs. Those bytes come
+         * from JS, so nothing else stops Android killing the browser mid-transfer.
+         */
+        fun hold(context: Context) {
+            try {
+                context.startForegroundService(
+                    Intent(context, DownloadService::class.java).apply { action = ACTION_HOLD }
+                )
+            } catch (e: Exception) {
+                // Backgrounded apps may not start a foreground service; the transfer still
+                // runs, it just loses the protection.
+                Log.w(TAG, "Could not hold foreground service: ${e.message}")
+            }
+        }
+
+        /** Lets the service stop once nothing else is running. */
+        fun release(context: Context) {
+            try {
+                context.startService(
+                    Intent(context, DownloadService::class.java).apply { action = ACTION_RELEASE }
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not release foreground service: ${e.message}")
+            }
         }
 
         /** Cancels an in-flight download. Failed entries are already done — just remove those. */

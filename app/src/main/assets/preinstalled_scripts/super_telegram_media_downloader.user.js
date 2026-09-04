@@ -35,7 +35,8 @@
         DOC_PROBE_MS: 2500,        // how long to wait for a click to show any sign of life
         DOC_IDLE_TIMEOUT: 25000,   // give up if Telegram shows no transfer activity for this long
         DOC_MAX_WAIT: 600000,      // absolute ceiling for one file Telegram is fetching itself
-        NATIVE_CHUNK_BYTES: 1024 * 1024,  // slice size handed to Scriptoria's streaming bridge
+        NATIVE_CHUNK_BYTES: 4 * 1024 * 1024,   // slice size handed to Scriptoria's streaming bridge
+        NATIVE_QUEUE_BYTES: 12 * 1024 * 1024,  // how far fetching may run ahead of disk writes
     };
 
     // Anything that means "a transfer is in flight", across both web clients.
@@ -1108,15 +1109,41 @@
                 log.info(`Handed to browser Downloads: ${item.fileName}`);
             }
 
-            // Straight to disk when the browser supports it, else buffered in memory as before.
-            const consume = async (blob) => {
-                if (nativeId === null) { blobs.push(blob); return true; }
-                return await NativeStream.write(nativeId, blob);
+            // Writes are queued, not awaited, so the next range request starts while the
+            // previous chunk is still going to disk. Awaiting each write made the transfer run
+            // at (network + encode + write) per chunk instead of overlapping them.
+            let writeChain = Promise.resolve(true);
+            let queuedBytes = 0;
+            let writeFailed = false;
+            // Split the wall clock so a slow transfer can be blamed on the right thing:
+            // waiting on Telegram, or waiting on our own disk handoff.
+            let fetchMs = 0, writeWaitMs = 0, chunkCount = 0;
+
+            const enqueueWrite = (blob) => {
+                if (nativeId === null) { blobs.push(blob); return; }
+                queuedBytes += blob.size;
+                writeChain = writeChain.then(async (ok) => {
+                    try {
+                        if (!ok) return false;
+                        const written = await NativeStream.write(nativeId, blob);
+                        if (!written) writeFailed = true;
+                        return written;
+                    } finally {
+                        queuedBytes -= blob.size;
+                    }
+                });
+            };
+
+            // Bounded, so a fast network cannot pull the whole file into memory ahead of disk.
+            const applyBackpressure = async () => {
+                if (queuedBytes > CONFIG.NATIVE_QUEUE_BYTES) await writeChain;
             };
 
             // The browser dropped the session, which means it was cancelled from Downloads.
             const cancelledByBrowser = () => {
                 abortCtrl.abort();
+                // Drop the half-written file rather than leaving an open session behind.
+                if (nativeId !== null) NativeStream.abort(nativeId);
                 nativeId = null;
                 UI.removeToast(item.id);
                 this._active.delete(item.id);
@@ -1127,6 +1154,7 @@
             const fetchChunk = async (retries = 3) => {
                 if (abortCtrl.signal.aborted) return;
                 try {
+                    const tNet = performance.now();
                     const res = await fetch(item.url, {
                         method: "GET", headers: { Range: `bytes=${offset}-` }, signal: abortCtrl.signal,
                     });
@@ -1143,21 +1171,27 @@
                         if (nativeId !== null) NativeStream.setTotal(nativeId, totalSize);
                     } else if (res.status === 200) {
                         const blob = await res.blob();
+                        fetchMs += performance.now() - tNet; chunkCount++;
                         totalSize = blob.size; offset = totalSize;
                         if (nativeId !== null) NativeStream.setTotal(nativeId, totalSize);
-                        const whole = await consume(blob);
-                        if (!whole) return cancelledByBrowser();
+                        enqueueWrite(blob);
+                        if (writeFailed) return cancelledByBrowser();
                         UI.updateToast(item.id, { fileName: realFileName, pct: 100, downloaded: offset, total: totalSize });
-                        finalize(); return;
+                        await finalize(); return;
                     }
 
-                    const written = await consume(await res.blob());
-                    if (!written) return cancelledByBrowser();
+                    const body = await res.blob();
+                    fetchMs += performance.now() - tNet; chunkCount++;
+                    enqueueWrite(body);
+                    const tWait = performance.now();
+                    await applyBackpressure();
+                    writeWaitMs += performance.now() - tWait;
+                    if (writeFailed) return cancelledByBrowser();
                     const pct = totalSize ? Math.floor((offset * 100) / totalSize) : 0;
                     UI.updateToast(item.id, { fileName: realFileName, pct, downloaded: offset, total: totalSize });
 
                     if (offset < totalSize) await fetchChunk();
-                    else finalize();
+                    else await finalize();
                 } catch (err) {
                     if (abortCtrl.signal.aborted) return;
                     if (retries > 0) {
@@ -1176,6 +1210,10 @@
                                 const entry = this._active.get(item.id);
                                 if (entry) entry.nativeId = nativeId;
                             }
+                            // Queued writes target the file we just dropped; start clean.
+                            writeChain = Promise.resolve(true);
+                            queuedBytes = 0;
+                            writeFailed = false;
                             offset = 0; blobs = []; totalSize = null;
                             UI.updateToast(item.id, { pct: 0, state: null });
                             fetchChunk();
@@ -1184,9 +1222,18 @@
                 }
             };
 
-            const finalize = () => {
+            const finalize = async () => {
                 const mimeMap = { audio: "audio/ogg", video: "video/mp4", document: "application/octet-stream" };
                 if (nativeId !== null) {
+                    // Drain queued writes before publishing, or the file would be truncated.
+                    const tDrain = performance.now();
+                    const ok = await writeChain;
+                    if (!ok || writeFailed) return cancelledByBrowser();
+                    writeWaitMs += performance.now() - tDrain;
+                    try {
+                        window.ScriptoriaNativeBridge.logDownloadStats(nativeId,
+                            `fetch=${Math.round(fetchMs)}ms writeWait=${Math.round(writeWaitMs)}ms chunks=${chunkCount}`);
+                    } catch (err) {}
                     NativeStream.finish(nativeId);
                 } else {
                     this._saveBlob(new Blob(blobs, { type: mimeMap[item.type] || "application/octet-stream" }), realFileName);
