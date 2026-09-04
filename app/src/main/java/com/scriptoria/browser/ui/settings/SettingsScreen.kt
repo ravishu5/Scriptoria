@@ -61,6 +61,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.documentfile.provider.DocumentFile
 import com.scriptoria.browser.data.preferences.DownloadPreferences
+import com.scriptoria.browser.engine.adblock.AdblockManager
 import com.scriptoria.browser.engine.executor.UserscriptManager
 import kotlinx.coroutines.launch
 
@@ -69,6 +70,7 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     userscriptManager: UserscriptManager,
     downloadPreferences: DownloadPreferences,
+    adblockManager: AdblockManager,
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -165,6 +167,10 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            SettingsGroup(title = "Privacy") {
+                AdblockSettingsCard(adblockManager = adblockManager)
             }
 
             // Downloads & Storage Section

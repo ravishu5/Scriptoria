@@ -11,6 +11,12 @@ import com.scriptoria.browser.data.repository.ScriptRepository
 import com.scriptoria.browser.data.storage.ScriptFileStore
 import com.scriptoria.browser.engine.executor.RequireManager
 import com.scriptoria.browser.engine.executor.UserscriptManager
+import com.scriptoria.browser.data.preferences.AdblockPreferences
+import com.scriptoria.browser.engine.adblock.AdblockManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +42,13 @@ class ScriptoriaApp : Application() {
         private set
     lateinit var appConfigRepository: com.scriptoria.browser.data.config.AppConfigRepository
         private set
+    lateinit var adblockPreferences: AdblockPreferences
+        private set
+    lateinit var adblockManager: AdblockManager
+        private set
+
+    /** Outlives any one activity, for work that must not be cancelled by a rotation. */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -67,9 +80,24 @@ class ScriptoriaApp : Application() {
 
         appConfigRepository = com.scriptoria.browser.data.config.AppConfigRepository(this, httpClient)
 
+        adblockPreferences = AdblockPreferences(this)
+        adblockManager = AdblockManager(this, httpClient, adblockPreferences)
+        startAdblock()
+
         // Nothing can be mid-transfer at process start, so any leftover progress notification
         // or pending file belongs to a download that died with the previous process.
         com.scriptoria.browser.engine.network.StreamDownloads.clearOrphans(this)
+    }
+
+    /**
+     * Loads whatever is already compiled before going to the network, so a browser start with a
+     * warm cache begins blocking immediately instead of waiting on EasyList to download.
+     */
+    private fun startAdblock() {
+        appScope.launch {
+            if (adblockManager.store.hasCompiledData()) adblockManager.load()
+            adblockManager.refreshLists(force = false)
+        }
     }
 
     private fun createNotificationChannel() {

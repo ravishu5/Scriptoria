@@ -1,5 +1,6 @@
 package com.scriptoria.browser.ui.browser
 
+import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
@@ -38,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.scriptoria.browser.engine.webview.ScriptoriaWebChromeClient
 import com.scriptoria.browser.engine.webview.ScriptoriaWebView
+import com.scriptoria.browser.ScriptoriaApp
 import com.scriptoria.browser.engine.webview.ScriptoriaWebViewClient
 import com.scriptoria.browser.ui.browser.components.ActiveScriptsBottomSheet
 import com.scriptoria.browser.ui.browser.components.BrowserMenuBottomSheet
@@ -191,6 +193,7 @@ fun BrowserScreen(
 
                             webViewClient = ScriptoriaWebViewClient(
                                 userscriptManager = viewModel.userscriptManager,
+                                adblockManager = this@apply.adblockManager,
                                 onUrlChange = { newUrl ->
                                     viewModel.updateTabUrl(tab.id, newUrl)
                                     viewModel.updateTabNavigation(tab.id, canGoBack(), canGoForward())
@@ -255,7 +258,25 @@ fun BrowserScreen(
     }
 
     if (showMenu) {
+        val adblockManager = (context.applicationContext as ScriptoriaApp).adblockManager
+        val currentHost = remember(activeTab?.url) {
+            activeTab?.url?.let { runCatching { Uri.parse(it).host }.getOrNull() }
+                ?.takeIf { it.isNotBlank() }
+        }
+
         BrowserMenuBottomSheet(
+            adblockHost = currentHost,
+            isAdblockOnForSite = currentHost != null &&
+                adblockManager.preferences.isEnabled &&
+                !adblockManager.preferences.isAllowlisted(currentHost),
+            onToggleAdblockForSite = { blockingOn ->
+                currentHost?.let {
+                    adblockManager.preferences.setAllowlisted(it, allowed = !blockingOn)
+                    // Rules are applied as the document loads, so the change only shows on a reload.
+                    activeTab?.webView?.reload()
+                }
+                viewModel.dismissMenu()
+            },
             onNewTab = { viewModel.createTab(makeActive = true) },
             onOpenDownloads = onNavigateToDownloads,
             onOpenUserscripts = onNavigateToUserscripts,

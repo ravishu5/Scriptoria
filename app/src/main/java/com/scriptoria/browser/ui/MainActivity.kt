@@ -157,6 +157,7 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 userscriptManager = userscriptManager,
                                 downloadPreferences = (application as ScriptoriaApp).downloadPreferences,
+                                adblockManager = (application as ScriptoriaApp).adblockManager,
                                 onNavigateBack = { currentScreen = AppScreen.Browser }
                             )
                         }

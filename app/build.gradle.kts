@@ -73,6 +73,14 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests {
+            // The ad-block engine matches on android.net.Uri, so its tests run under Robolectric
+            // rather than against the stub android.jar.
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -107,6 +115,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.json)
+    testImplementation(libs.robolectric)
 
     debugImplementation(libs.androidx.ui.tooling)
 }

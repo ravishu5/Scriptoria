@@ -4,8 +4,10 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.scriptoria.browser.engine.adblock.AdblockManager
 import com.scriptoria.browser.data.repository.InstalledScript
 import com.scriptoria.browser.engine.console.LogLevel
 import com.scriptoria.browser.engine.console.UserscriptConsole
@@ -17,16 +19,46 @@ import kotlinx.coroutines.launch
 
 class ScriptoriaWebViewClient(
     private val userscriptManager: UserscriptManager,
+    private val adblockManager: AdblockManager,
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.Main),
     private val onUrlChange: (url: String) -> Unit,
     private val onUserscriptUrlDetected: (url: String) -> Unit,
     private val onScriptsActiveCountChanged: (count: Int, scripts: List<InstalledScript>) -> Unit
 ) : WebViewClient() {
 
+    /**
+     * shouldInterceptRequest is called from a WebView background thread and cannot read view.url,
+     * so the document a subresource belongs to has to be recorded as navigation happens.
+     */
+    @Volatile
+    private var currentPageUrl: String? = null
+
+    /**
+     * Called once per subresource, on a background thread, with the load blocked until it returns.
+     * Everything it touches is in memory; a miss is a few hash lookups.
+     */
+    override fun shouldInterceptRequest(
+        view: WebView?,
+        request: WebResourceRequest?
+    ): WebResourceResponse? {
+        if (request == null) return null
+        return adblockManager.intercept(request, currentPageUrl)
+    }
+
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         // Keeps the bridge's idea of the current page ahead of the new document's scripts.
         request?.url?.toString()?.let { (view as? ScriptoriaWebView)?.nativeBridge?.updateCurrentUrl(it) }
         val url = request?.url?.toString() ?: return false
+
+        // Re-issue top-level navigations with tracking parameters stripped. The clean URL has
+        // nothing left to match, so the second pass through here falls straight through.
+        if (request.isForMainFrame) {
+            adblockManager.rewriteNavigation(url)?.let { cleaned ->
+                view?.loadUrl(cleaned)
+                return true
+            }
+            currentPageUrl = url
+        }
 
         // Intercept userscript installation URLs (.user.js)
         val cleanUrl = url.substringBefore('?').substringBefore('#')
@@ -42,9 +74,16 @@ class ScriptoriaWebViewClient(
         super.onPageStarted(view, url, favicon)
         if (url == null || view !is ScriptoriaWebView) return
 
+        currentPageUrl = url
         onUrlChange(url)
         view.nativeBridge.updateCurrentUrl(url)
         view.tokenManager.clearForNavigation()
+
+        // On WebView versions without document-start scripts this is the earliest hook available;
+        // where the feature exists the injection has already run and returns immediately.
+        if (!view.hasDocumentStartInjection) {
+            view.evaluateJavascript(view.documentStartScript(), null)
+        }
 
         // Inject early runtime polyfills (download hook, FileSystemAccess API, blob protection)
         view.evaluateJavascript(CORE_DOWNLOAD_POLYFILL, null)
