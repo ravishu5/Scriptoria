@@ -24,6 +24,8 @@ class ScriptoriaWebViewClient(
 ) : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+        // Keeps the bridge's idea of the current page ahead of the new document's scripts.
+        request?.url?.toString()?.let { (view as? ScriptoriaWebView)?.nativeBridge?.updateCurrentUrl(it) }
         val url = request?.url?.toString() ?: return false
 
         // Intercept userscript installation URLs (.user.js)
@@ -41,6 +43,7 @@ class ScriptoriaWebViewClient(
         if (url == null || view !is ScriptoriaWebView) return
 
         onUrlChange(url)
+        view.nativeBridge.updateCurrentUrl(url)
         view.tokenManager.clearForNavigation()
 
         // Inject early runtime polyfills (download hook, FileSystemAccess API, blob protection)

@@ -41,10 +41,61 @@ class ScriptoriaNativeBridge(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val activeMenuCommands = ConcurrentHashMap<String, String>() // fnId -> caption
 
+    private companion object {
+        const val HOME_PAGE_URL = "file:///android_asset/home.html"
+        const val HOME_PREFS = "scriptoria_home"
+        const val KEY_SHORTCUTS = "shortcuts"
+    }
+
     private fun getAuthorizedScriptId(token: String?): Long? {
         val webView = webViewRef.get() ?: return null
         val currentUrl = webView.url.orEmpty()
         return tokenManager.getScriptIdIfValid(token, currentUrl)
+    }
+
+    /**
+     * Home page shortcuts.
+     *
+     * localStorage cannot hold these: the start page is served from file:///android_asset,
+     * which Chromium treats as an opaque origin, so web storage there is memory-only and is
+     * lost the moment the page goes away.
+     *
+     * Gated to the start page. The bridge is exposed to every page, and without this any site
+     * could read the user's shortcuts or silently plant one pointing wherever it liked.
+     */
+    /**
+     * Tracked rather than read from the WebView on demand: getUrl() is main-thread only and
+     * returns null when called from the JavaScript bridge thread, which silently made every
+     * check below fail. Set from onPageStarted, which already runs on the main thread.
+     */
+    @Volatile
+    private var currentPageUrl: String = ""
+
+    fun updateCurrentUrl(url: String) {
+        currentPageUrl = url
+    }
+
+    private fun isHomePage(): Boolean = currentPageUrl.startsWith(HOME_PAGE_URL)
+
+    private fun homePrefs() =
+        webViewRef.get()?.context?.getSharedPreferences(HOME_PREFS, Context.MODE_PRIVATE)
+
+    @JavascriptInterface
+    fun getHomeShortcuts(): String {
+        if (!isHomePage()) return "[]"
+        return homePrefs()?.getString(KEY_SHORTCUTS, null) ?: "[]"
+    }
+
+    @JavascriptInterface
+    fun setHomeShortcuts(json: String) {
+        if (!isHomePage()) return
+        try {
+            // Parsed before storing so a malformed write cannot wedge the page on next load.
+            JSONArray(json)
+            homePrefs()?.edit()?.putString(KEY_SHORTCUTS, json)?.apply()
+        } catch (e: Exception) {
+            Log.w("ScriptoriaBridge", "Rejected malformed shortcuts payload", e)
+        }
     }
 
     @JavascriptInterface

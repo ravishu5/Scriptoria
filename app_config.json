@@ -1,0 +1,8 @@
+{
+  "_comment": "Edit on main and the change reaches every installed app within one launch. Raise minVersionCode only for releases users MUST take (security fix, broken API, data migration) - it hard-blocks older builds.",
+  "minVersionCode": 1,
+  "latestVersionCode": 1,
+  "latestVersionName": "1.0.0",
+  "updateUrl": "https://github.com/ravishu5/Scriptoria/releases/latest",
+  "message": ""
+}

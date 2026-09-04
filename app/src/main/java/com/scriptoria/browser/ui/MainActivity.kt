@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,7 +30,10 @@ import com.scriptoria.browser.ui.downloads.DownloadsScreen
 import com.scriptoria.browser.ui.editor.ScriptEditorScreen
 import com.scriptoria.browser.ui.manager.ScriptDetailScreen
 import com.scriptoria.browser.ui.manager.ScriptListScreen
+import com.scriptoria.browser.data.config.AppConfig
+import com.scriptoria.browser.data.config.UpdateStatus
 import com.scriptoria.browser.ui.settings.SettingsScreen
+import com.scriptoria.browser.ui.update.UpdateGate
 
 sealed class AppScreen {
     object Browser : AppScreen()
@@ -64,6 +68,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             val userscriptManager = (application as ScriptoriaApp).userscriptManager
             var currentScreen by remember { mutableStateOf<AppScreen>(AppScreen.Browser) }
+
+            // Version gate. Checked once per launch and off the critical path: the browser is
+            // usable while this resolves, and stays usable if it never does.
+            val configRepository = (application as ScriptoriaApp).appConfigRepository
+            var appConfig by remember { mutableStateOf<AppConfig?>(null) }
+            var updateStatus by remember { mutableStateOf(UpdateStatus.NONE) }
+            var updateDismissed by remember { mutableStateOf(false) }
+
+            LaunchedEffect(Unit) {
+                val config = configRepository.refresh()
+                appConfig = config
+                updateStatus = configRepository.statusFor(config)
+            }
 
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -144,6 +161,16 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+
+                    UpdateGate(
+                        status = if (updateDismissed && updateStatus == UpdateStatus.OPTIONAL) {
+                            UpdateStatus.NONE
+                        } else {
+                            updateStatus
+                        },
+                        config = appConfig,
+                        onDismiss = { updateDismissed = true }
+                    )
                 }
             }
         }

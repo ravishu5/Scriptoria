@@ -47,7 +47,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val showMenu: StateFlow<Boolean> = _showMenu.asStateFlow()
 
     init {
-        createTab("https://duckduckgo.com", makeActive = true)
+        createTab(HOME_URL, makeActive = true)
     }
 
     fun getActiveTab(): TabModel? {
@@ -55,7 +55,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         return _tabs.value.firstOrNull { it.id == currentId }
     }
 
-    fun createTab(url: String = "https://duckduckgo.com", makeActive: Boolean = true): String {
+    fun createTab(url: String = HOME_URL, makeActive: Boolean = true): String {
         val newTab = TabModel(url = url)
         _tabs.value = _tabs.value + newTab
         if (makeActive || _activeTabId.value.isEmpty()) {
@@ -69,15 +69,18 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         val tabToClose = currentList.firstOrNull { it.id == tabId }
         tabToClose?.webView?.destroy()
 
-        val updated = currentList.filter { it.id != tabId }
-        if (updated.isEmpty()) {
-            // Keep at least one tab
-            createTab("https://duckduckgo.com", makeActive = true)
-        } else {
-            _tabs.value = updated
-            if (_activeTabId.value == tabId) {
-                _activeTabId.value = updated.last().id
-            }
+        // Commit the removal first. Closing the last tab used to skip this and append the
+        // replacement to the old list, leaving the destroyed WebView in the switcher.
+        _tabs.value = currentList.filter { it.id != tabId }
+
+        if (_tabs.value.isEmpty()) {
+            _activeTabId.value = ""
+            createTab(HOME_URL, makeActive = true)
+        } else if (_activeTabId.value == tabId) {
+            // Prefer the neighbour to the left, which is what closing a tab usually means.
+            val closedIndex = currentList.indexOfFirst { it.id == tabId }
+            val next = _tabs.value.getOrNull(closedIndex - 1) ?: _tabs.value.first()
+            _activeTabId.value = next.id
         }
     }
 
@@ -117,7 +120,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         val url = when {
             trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("file://") -> trimmed
             trimmed.contains('.') && !trimmed.contains(' ') -> "https://$trimmed"
-            else -> "https://duckduckgo.com/?q=${java.net.URLEncoder.encode(trimmed, "UTF-8")}"
+            else -> "https://www.google.com/search?q=${java.net.URLEncoder.encode(trimmed, "UTF-8")}"
         }
 
         val tab = _tabs.value.firstOrNull { it.id == tabId }

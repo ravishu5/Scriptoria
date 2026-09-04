@@ -69,8 +69,12 @@ class DownloadService : Service() {
             ACTION_CANCEL -> {
                 val id = intent.getIntExtra(EXTRA_DOWNLOAD_ID, -1)
                 if (id != -1) {
+                    // A download is either an OkHttp call we own or a page-driven stream, and
+                    // the id space is shared, so try both. Cancelling only the former left
+                    // every Telegram download unstoppable.
                     cancelled[id] = true
                     activeCalls[id]?.cancel()
+                    StreamDownloads.abort(applicationContext, id)
                 }
                 stopIfIdle()
             }
